@@ -1,0 +1,15 @@
+[package]
+name = "ttt-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+governance = { path = "../programs/governance" }
+clap = { version = "4.3.0", features = ["derive"] }
+solana-cli-config = "2.1.6" 
+anchor-client = { version = "0.30.1", features = ["async"] }
+anchor-spl = "0.30"
+tokio = { version = "1.29", features = ["rt-multi-thread", "macros"] }
+tilde-expand = "0.1"
+spl-token = "7.0"
+# spl-associated-token-account = "6.0"
