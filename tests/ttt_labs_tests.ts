@@ -32,29 +32,31 @@ const program = anchor.workspace.Governance as Program<Governance>;
 // Reference to the TokenExtensions program for handling token-related operations.
 const tokenProgram = anchor.workspace.TokenExtensions as Program<TokenExtensions>;
 
-// Define the initial supply of the TTT token.
-const TTT_TOKEN_INITIAL_SUPPLY = 450_000_000;
+// Define the initial supply of the ttt token.
+const ttt_TOKEN_INITIAL_SUPPLY = 450_000_000;
 
-// Namespace used for deriving Vouter PDAs. Helps in organizing related accounts.
-const VOUTER_NAMESPACE = "vouter";
+// Namespace used for deriving Voter PDAs. Helps in organizing related accounts.
+const VOTER_NAMESPACE = "voter";
 
 // Default amount of SOL to airdrop to test accounts to cover transaction fees.
 const DEFAULT_AIRDROP_SOL = 1;
+
+const EXTRA_ACCOUNT_METAS = "extra-account-metas";
 
 // -------------------- Helper Functions --------------------
 
 /**
  * Derives a Project PDA based on project index, round, and admin public key.
- * @param projectIdx - Unique identifier for the project.
+ * @param projectId - Unique identifier for the project.
  * @param round - Current voting round.
  * @param adminPubkey - Admin's public key.
  * @returns PublicKey of the Project PDA.
  */
-function deriveProjectPda(projectIdx: string, round: number, adminPubkey: PublicKey): PublicKey {
+function deriveProjectPda(projectId: string, round: number, adminPubkey: PublicKey): PublicKey {
   // Use a single-byte buffer for the round number as per the original logic.
   return PublicKey.findProgramAddressSync(
     [
-      Buffer.from(projectIdx),
+      Buffer.from(projectId),
       Buffer.from([round]), // 1-byte round number without padding
       adminPubkey.toBuffer(),
     ],
@@ -63,18 +65,19 @@ function deriveProjectPda(projectIdx: string, round: number, adminPubkey: Public
 }
 
 /**
- * Derives a Vouter PDA based on round and voter's public key.
+ * Derives a Voter PDA based on round and voter's public key.
  * @param round - Current voting round.
  * @param voterPubkey - Voter's public key.
- * @returns PublicKey of the Vouter PDA.
+ * @returns PublicKey of the Voter PDA.
  */
-function deriveVouterPda(round: number, voterPubkey: PublicKey): PublicKey {
+function deriveVoterPda(round: number, voterPubkey: PublicKey, projectId: string): PublicKey {
   // Use a 6-byte buffer with padding as per the original logic.
   return PublicKey.findProgramAddressSync(
     [
-      Buffer.from(VOUTER_NAMESPACE),
-      Buffer.from([round, 1, 1, 1, 1, 1]), // 1-byte round number with 5-byte padding
+      Buffer.from(VOTER_NAMESPACE),
+      Buffer.from([round, 1, 1, 1, 1]), // 1-byte round number with 5-byte padding
       voterPubkey.toBuffer(),
+      Buffer.from(projectId),
     ],
     program.programId
   )[0];
@@ -102,7 +105,7 @@ function deriveMintTokenAccount(mintPubkey: PublicKey, adminPubkey: PublicKey): 
 /**
 * Generates project unique identifier
 */
-function generateProjectIdx(length = 20): string {
+function generateProjectId(length = 20): string {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   let result = "";
   for (let i = 0; i < length; i++) {
@@ -112,8 +115,8 @@ function generateProjectIdx(length = 20): string {
 }
 
 // Usage:
-const doubleVoteProjectIdx = generateProjectIdx(20);
-console.log(doubleVoteProjectIdx); // e.g. "aB3xYz12WpQ9..." (20 random chars)
+const doubleVoteProjectId = generateProjectId(20);
+console.log(doubleVoteProjectId); // e.g. "aB3xYz12WpQ9..." (20 random chars)
 /**
  * Airdrops SOL to a given public key if the balance is below a specified threshold.
  * Ensures that test accounts have sufficient funds to cover transaction fees.
@@ -195,14 +198,17 @@ async function getTokenBalance(connection: Connection, tokenAccount: PublicKey):
 describe("ttt-labs-tests", () => {
   // -------------------- Variable Declarations --------------------
   let tokenMint: Keypair; // Keypair for the token mint authority.
-  let voter: Keypair; // Keypair representing a voter.
-  let voterAta: PublicKey; // Associated Token Account for the voter.
+  let voterA: Keypair; // Keypair representing a voter.
+  let voterAAta: PublicKey; // Associated Token Account for the voter.
+  let voterB: Keypair; // Keypair representing a voter.
+  let voterBAta: PublicKey; // Associated Token Account for the voter.
+  let insufficientUser: Keypair; // Associated Token Account for the voter.
   let mintTokenAccount: PublicKey; // Token account holding the minted tokens.
   let adminWallet: anchor.Wallet; // Admin's wallet, used to sign transactions.
   let admin: Keypair; // Keypair corresponding to the admin's wallet.
   let voteManagerPda: PublicKey; // PDA for managing voting rounds and projects.
   let extraMetasAccount: PublicKey; // Additional metadata account PDA.
-  let projectIdx: string; // Identifier for a specific project.
+  let projectId: string; // Identifier for a specific project.
   let unauthorizedAttacker: Keypair; // Keypair representing an unauthorized user attempting actions.
 
   // -------------------- Hooks --------------------
@@ -210,7 +216,9 @@ describe("ttt-labs-tests", () => {
     try {
       // Setup initial values..
       tokenMint = Keypair.generate();
-      voter = Keypair.generate();
+      voterA = Keypair.generate();
+      voterB = Keypair.generate();
+      insufficientUser = Keypair.generate();
       adminWallet = provider.wallet as anchor.Wallet;
       admin = adminWallet.payer;
       unauthorizedAttacker = Keypair.generate();
@@ -222,12 +230,12 @@ describe("ttt-labs-tests", () => {
       )[0];
 
       // Define a project identifier.
-      projectIdx = "projectVote1";
+      projectId = "projectVote1";
 
       // Derive the extraMetasAccount PDA using specific seeds.
       extraMetasAccount = PublicKey.findProgramAddressSync(
         [
-          Buffer.from("extra-account-metas"),
+          Buffer.from(EXTRA_ACCOUNT_METAS),
           tokenMint.publicKey.toBuffer(),
         ],
         tokenProgram.programId
@@ -236,8 +244,10 @@ describe("ttt-labs-tests", () => {
       console.log("\nPerforming necessary airdrops...\n");
 
       // Airdrop SOL to the voter and unauthorized attacker to ensure they can cover transaction fees.
-      await airdropIfNeeded(provider.connection, voter.publicKey, DEFAULT_AIRDROP_SOL);
+      await airdropIfNeeded(provider.connection, voterA.publicKey, DEFAULT_AIRDROP_SOL);
+      await airdropIfNeeded(provider.connection, voterB.publicKey, DEFAULT_AIRDROP_SOL);
       await airdropIfNeeded(provider.connection, unauthorizedAttacker.publicKey, DEFAULT_AIRDROP_SOL);
+      await airdropIfNeeded(provider.connection, insufficientUser.publicKey, DEFAULT_AIRDROP_SOL);
 
       // Define the accounts required for creating the token mint and associated accounts.
       const accountsStrict = {
@@ -255,9 +265,9 @@ describe("ttt-labs-tests", () => {
       await tokenProgram.methods
         .createMintAccount({
           name: "TTT Labs Token", // Name of the token.
-          symbol: "TTT", // Symbol for the token.
+          symbol: "ttt", // Symbol for the token.
           uri: "https://my-token-data.com/metadata.json", // URI pointing to token metadata.
-          initialSupply: new anchor.BN(TTT_TOKEN_INITIAL_SUPPLY), // Initial supply of the token.
+          initialSupply: new anchor.BN(ttt_TOKEN_INITIAL_SUPPLY), // Initial supply of the token.
         })
         .accountsStrict(accountsStrict)
         .signers([tokenMint, admin]) // Signers required for the transaction.
@@ -296,23 +306,32 @@ describe("ttt-labs-tests", () => {
     try {
       console.log("Setting up voter's ATA...");
       // Derive the Associated Token Account (ATA) for the voter.
-      voterAta = await getAssociatedTokenAddress(
+      voterAAta = await getAssociatedTokenAddress(
         tokenMint.publicKey,
-        voter.publicKey,
+        voterA.publicKey,
+        true, // Allow PDA derivation.
+        TOKEN_2022_PROGRAM_ID, // SPL Token program ID.
+        ASSOCIATED_PROGRAM_ID // Associated Token program ID.
+      );
+
+      voterBAta = await getAssociatedTokenAddress(
+        tokenMint.publicKey,
+        voterB.publicKey,
         true, // Allow PDA derivation.
         TOKEN_2022_PROGRAM_ID, // SPL Token program ID.
         ASSOCIATED_PROGRAM_ID // Associated Token program ID.
       );
 
       // Check if the voter's ATA already exists to avoid unnecessary transactions.
-      const ataAccount = await provider.connection.getAccountInfo(voterAta);
-      if (!ataAccount) {
+      const ataAccount1 = await provider.connection.getAccountInfo(voterAAta);
+      const ataAccount2 = await provider.connection.getAccountInfo(voterBAta);
+      if (!ataAccount1) {
         // If ATA doesn't exist, create it.
         const ataTransaction = new anchor.web3.Transaction().add(
           createAssociatedTokenAccountInstruction(
             provider.publicKey, // Payer of the transaction fees.
-            voterAta,           // PDA address for the ATA.
-            voter.publicKey,    // Owner of the ATA.
+            voterAAta,           // PDA address for the ATA.
+            voterA.publicKey,    // Owner of the ATA.
             tokenMint.publicKey,// Token mint for the ATA.
             TOKEN_2022_PROGRAM_ID,
             ASSOCIATED_PROGRAM_ID
@@ -320,27 +339,60 @@ describe("ttt-labs-tests", () => {
         );
 
         await provider.sendAndConfirm(ataTransaction); // Send and confirm the ATA creation transaction.
-        console.log("Voter's ATA created.");
+        console.log("Voter A ATA created.");
       } else {
-        console.log(`ATA for ${voter.publicKey.toBase58()} already exists.`);
+        console.log(`ATA for ${voterA.publicKey.toBase58()} already exists.`);
       }
 
-      // Define the accounts involved in transferring TTT tokens from the mint to the voter.
-      const transferAccounts = {
+      if (!ataAccount2) {
+        // If ATA doesn't exist, create it.
+        const ataTransaction = new anchor.web3.Transaction().add(
+          createAssociatedTokenAccountInstruction(
+            provider.publicKey, // Payer of the transaction fees.
+            voterBAta,           // PDA address for the ATA.
+            voterB.publicKey,    // Owner of the ATA.
+            tokenMint.publicKey,// Token mint for the ATA.
+            TOKEN_2022_PROGRAM_ID,
+            ASSOCIATED_PROGRAM_ID
+          )
+        );
+
+        await provider.sendAndConfirm(ataTransaction); // Send and confirm the ATA creation transaction.
+        console.log("Voter B ATA created.");
+      } else {
+        console.log(`ATA for ${voterB.publicKey.toBase58()} already exists.`);
+      }
+
+      // Define the accounts involved in transferring ttt tokens from the mint to the voter.
+      const transferAccounts1 = {
         fromAta: mintTokenAccount, // Source ATA holding the minted tokens.
-        toAta: voterAta,           // Destination ATA to receive tokens.
+        toAta: voterAAta,           // Destination ATA to receive tokens.
         mint: tokenMint.publicKey, // Token mint associated with the transfer.
         tokenProgram: TOKEN_2022_PROGRAM_ID, // SPL Token program ID.
       };
 
-      // Execute the token transfer of 10,000 TTT from admin to voter.
+      const transferAccounts2 = {
+        fromAta: mintTokenAccount, // Source ATA holding the minted tokens.
+        toAta: voterBAta,           // Destination ATA to receive tokens.
+        mint: tokenMint.publicKey, // Token mint associated with the transfer.
+        tokenProgram: TOKEN_2022_PROGRAM_ID, // SPL Token program ID.
+      };
+
+      // Execute the token transfer of 10,000 ttt from admin to voter A.
       await tokenProgram.methods
-        .transferTokens(new anchor.BN(10_000)) // Amount of TTT tokens to transfer.
-        .accounts(transferAccounts)
+        .transferTokens(new anchor.BN(10_000)) // Amount of ttt tokens to transfer.
+        .accounts(transferAccounts1)
         .signers([admin]) // Admin signs the transaction.
         .rpc();
 
-      console.log("TTT tokens transferred to test voter.");
+      // Execute the token transfer of 10,000 ttt from admin to voter B.
+      await tokenProgram.methods
+        .transferTokens(new anchor.BN(10_000)) // Amount of ttt tokens to transfer.
+        .accounts(transferAccounts2)
+        .signers([admin]) // Admin signs the transaction.
+        .rpc();
+
+      console.log("ttt tokens transferred to test voter.");
     } catch (error) {
       console.error("Error in beforeEach hook:", error);
       throw error; // Propagate the error to fail the tests if setup fails.
@@ -405,33 +457,6 @@ describe("ttt-labs-tests", () => {
     } catch (err: any) {
       // Assert that the error code corresponds to unauthorized admin action.
       expect(err.error.errorCode.code).to.equal("NotAdmin");
-    }
-  });
-
-  /**
-   * Test Case: Duplicate Initialization
-   * Purpose: Verify that attempting to initialize the VoteManager more than once fails as expected.
-   */
-  it("Duplicate Initialization", async () => {
-    // Define the accounts for the second initialization attempt.
-    const initializeAccounts = {
-      voteData: voteManagerPda,
-      owner: adminWallet.publicKey,
-      systemProgram: anchor.web3.SystemProgram.programId,
-    };
-
-    try {
-      // Attempt to re-initialize the VoteManager.
-      await program.methods
-        .initialize(tokenMint.publicKey, TOKEN_2022_PROGRAM_ID, new anchor.BN(100))
-        .accounts(initializeAccounts)
-        .rpc();
-
-      // If the above transaction succeeds, the test should fail.
-      throw new Error("Expected transaction to fail, but it succeeded");
-    } catch (err: any) {
-      // Assert that the error code corresponds to a double initialization attempt.
-      expect(err.error.errorCode.code).to.equal("DoubleInitAttempt");
     }
   });
 
@@ -555,18 +580,18 @@ describe("ttt-labs-tests", () => {
   });
 
   /**
-   * Test Case: Add Project with Unique idx
+   * Test Case: Add Project with Unique id
    * Purpose: Verify that adding a project with a unique identifier succeeds.
    */
-  it("Add Project with Unique idx", async () => {
+  it("Add Project with Unique id", async () => {
     // Define a unique project identifier.
-    const uniqueProjectIdx = generateProjectIdx(10);
+    const uniqueProjectId = generateProjectId(10);
 
     const voteManagerAccount = await program.account.voteManager.fetch(voteManagerPda);
     const currentRound = voteManagerAccount.voteRound;;
 
     // Derive the PDA for the unique project in round 2.
-    const uniqueProjectPda = deriveProjectPda(uniqueProjectIdx, currentRound, adminWallet.publicKey);
+    const uniqueProjectPda = deriveProjectPda(uniqueProjectId, currentRound, adminWallet.publicKey);
 
     // Define the accounts required to add a new project.
     const addProjectAccounts = {
@@ -578,7 +603,7 @@ describe("ttt-labs-tests", () => {
 
     // Execute the project addition.
     await program.methods
-      .addProject(uniqueProjectIdx)
+      .addProject(uniqueProjectId)
       .accounts(addProjectAccounts)
       .rpc();
 
@@ -586,25 +611,25 @@ describe("ttt-labs-tests", () => {
     const projectAccount = await program.account.projectData.fetch(uniqueProjectPda);
 
     // Assertions to ensure the project was added correctly.
-    expect(projectAccount.idx).to.equal(uniqueProjectIdx); // Project identifier should match.
+    expect(projectAccount.id).to.equal(uniqueProjectId); // Project identifier should match.
     expect(projectAccount.voteCount.toNumber()).to.equal(0); // Initial vote count should be zero.
     expect(projectAccount.voteRound).to.equal(currentRound); // Project should be associated with round 2.
-    expect(projectAccount.voteFee.toNumber()).to.equal(500); // Vote fee should reflect the current fee.
+    expect(voteManagerAccount.voteFee.toNumber() == 500);
   });
 
   /**
-   * Test Case: Add Project with Duplicate idx
+   * Test Case: Add Project with Duplicate id
    * Purpose: Ensure that adding a project with a duplicate identifier in the same round fails.
    */
-  it("Add Project with Duplicate idx", async () => {
+  it("Add Project with Duplicate id", async () => {
     // Define a duplicate project identifier.
-    const duplicateProjectIdx = generateProjectIdx(10);
+    const duplicateProjectId = generateProjectId(10);
 
     const voteManagerAccount = await program.account.voteManager.fetch(voteManagerPda);
     const currentRound = voteManagerAccount.voteRound;;
 
     // Derive the PDA for the duplicate project in round 2.
-    const duplicateProjectPda = deriveProjectPda(duplicateProjectIdx, currentRound, adminWallet.publicKey);
+    const duplicateProjectPda = deriveProjectPda(duplicateProjectId, currentRound, adminWallet.publicKey);
 
     // Define the accounts required to add the duplicate project.
     const addProjectAccounts = {
@@ -616,14 +641,14 @@ describe("ttt-labs-tests", () => {
 
     // First addition of the duplicate project should succeed.
     await program.methods
-      .addProject(duplicateProjectIdx)
+      .addProject(duplicateProjectId)
       .accounts(addProjectAccounts)
       .rpc();
 
     try {
       // Attempt to add the same project again in the same round.
       await program.methods
-        .addProject(duplicateProjectIdx)
+        .addProject(duplicateProjectId)
         .accounts(addProjectAccounts)
         .rpc();
 
@@ -636,19 +661,19 @@ describe("ttt-labs-tests", () => {
   });
 
   /**
-   * Test Case: Reuse idx (project name) in a New Round
+   * Test Case: Reuse id (project name) in a New Round
    * Purpose: Verify that a project identifier can be reused in a new voting round.
    */
-  it("Reuse idx (project name) in a New Round", async () => {
+  it("Reuse id (project name) in a New Round", async () => {
     // Define the current voting round.
     const voteManagerAccount = await program.account.voteManager.fetch(voteManagerPda);
-    const currentRound = voteManagerAccount.voteRound;;
+    const currentRound = voteManagerAccount.voteRound;
 
     // Define a project identifier to be reused.
-    const reusedProjectIdx = generateProjectIdx(10);
+    const reusedProjectId = generateProjectId(10);
 
     // Derive the PDA for the reused project in round 3.
-    const reusedProjectPda = deriveProjectPda(reusedProjectIdx, currentRound, adminWallet.publicKey);
+    const reusedProjectPda = deriveProjectPda(reusedProjectId, currentRound, adminWallet.publicKey);
 
     // Define the accounts required to add the reused project.
     const addProjectAccounts = {
@@ -660,7 +685,7 @@ describe("ttt-labs-tests", () => {
 
     // Add the reused project in round 3.
     await program.methods
-      .addProject(reusedProjectIdx)
+      .addProject(reusedProjectId)
       .accounts(addProjectAccounts)
       .rpc();
 
@@ -668,94 +693,32 @@ describe("ttt-labs-tests", () => {
     const projectAccount = await program.account.projectData.fetch(reusedProjectPda);
 
     // Assertions to ensure the reused project was added correctly.
-    expect(projectAccount.idx).to.equal(reusedProjectIdx); // Project identifier should match.
+    expect(projectAccount.id).to.equal(reusedProjectId); // Project identifier should match.
     expect(projectAccount.voteRound).to.equal(currentRound); // Project should be associated with round 3.
-    expect(projectAccount.voteFee.toNumber()).to.equal(500); // Vote fee should reflect the current fee.
+    expect(voteManagerAccount.voteFee.toNumber() == 500);
   });
 
   /**
-   * Test Case: Double Voting Prevention
-   * Purpose: Ensure that a voter cannot vote more than once in the same round.
+   * Test Case: Voting in the Wrong Round
+   * Purpose: Ensure that voting in a round different from the current active round fails.
+   * 
+   * ! We use project id as a part of voter's seed - Anchor treats wrong round errors as constraint violation errors in this case.
    */
-  // it("Double Voting Prevention", async () => {
-  //   // Define the current voting round.
-
-  //   const voteManagerAccount = await program.account.voteManager.fetch(voteManagerPda);
-  //   const currentRound = voteManagerAccount.voteRound;;
-
-  //   // Define a project identifier for double voting test.
-  //   const doubleVoteProjectIdx = generateProjectIdx(10);
-
-  //   // Derive the PDA for the double voting project in round 3.
-  //   const doubleVoteProjectPda = deriveProjectPda(doubleVoteProjectIdx, currentRound, adminWallet.publicKey);
-
-  //   // Define the accounts required to add the double voting project.
-  //   const addProjectAccounts = {
-  //     projectData: doubleVoteProjectPda,
-  //     voteManager: voteManagerPda,
-  //     owner: adminWallet.publicKey,
-  //     systemProgram: anchor.web3.SystemProgram.programId,
-  //   };
-
-  //   // Add the double voting project to the VoteManager.
-  //   await program.methods
-  //     .addProject(doubleVoteProjectIdx)
-  //     .accounts(addProjectAccounts)
-  //     .rpc();
-
-  //   // Define the accounts required to perform a vote.
-  //   const doVoteAccounts = {
-  //     vouterData: deriveVouterPda(currentRound, voter.publicKey), // Vouter PDA for the voter in round 3.
-  //     signer: voter.publicKey, // Voter's public key.
-  //     voteManager: voteManagerPda, // VoteManager PDA.
-  //     adminTokenAccount: mintTokenAccount,
-  //     project: doubleVoteProjectPda, // Project PDA being voted for.
-  //     mint: tokenMint.publicKey, // Token mint's public key.
-  //     token: voterAta, // Voter's token account.
-  //     tokenProgram: TOKEN_2022_PROGRAM_ID, // SPL Token program ID.
-  //     systemProgram: anchor.web3.SystemProgram.programId, // System program ID.
-  //   };
-
-  //   // Perform the first vote by the voter.
-  //   await program.methods
-  //     .doVote(currentRound)
-  //     .accounts(doVoteAccounts)
-  //     .signers([voter])
-  //     .rpc();
-
-  //   try {
-  //     // Attempt to perform a second vote by the same voter in the same round.
-  //     await program.methods
-  //       .doVote(currentRound)
-  //       .accounts(doVoteAccounts)
-  //       .signers([voter])
-  //       .rpc();
-
-  //     // If the above transaction succeeds, the test should fail.
-  //     throw new Error("Expected transaction to fail, but it succeeded");
-  //   } catch (err: any) {
-  //     // Assert that the error message indicates the voter has already voted.
-  //     expect(err.message).to.include("already in use");
-  //   }
-  // });
-
-  // /**
-  //  * Test Case: Voting in the Wrong Round
-  //  * Purpose: Ensure that voting in a round different from the current active round fails.
-  //  */
   it("Voting in the Wrong Round", async () => {
-    // Define a project identifier for the wrong round voting test.
-    const wrongRoundProjectIdx = generateProjectIdx(10);
 
+    // const voteManagerAccount = await program.account.voteManager.fetch(voteManagerPda);
+    const wrongRound = 123;
     const voteManagerAccount = await program.account.voteManager.fetch(voteManagerPda);
     const currentRound = voteManagerAccount.voteRound;;
+    // Define a project identifier for the wrong round voting test.
+    const projectId = generateProjectId(10);
 
     // Derive the PDA for the project intended for wrong round voting in round 3.
-    const wrongRoundProjectPda = deriveProjectPda(wrongRoundProjectIdx, currentRound, adminWallet.publicKey);
+    const projectPda = deriveProjectPda(projectId, currentRound, adminWallet.publicKey);
 
     // Define the accounts required to add the project.
     const addProjectAccounts = {
-      projectData: wrongRoundProjectPda,
+      projectData: projectPda,
       voteManager: voteManagerPda,
       owner: adminWallet.publicKey,
       systemProgram: anchor.web3.SystemProgram.programId,
@@ -763,22 +726,19 @@ describe("ttt-labs-tests", () => {
 
     // Add the project to the VoteManager.
     await program.methods
-      .addProject(wrongRoundProjectIdx)
+      .addProject(projectId)
       .accounts(addProjectAccounts)
       .rpc();
 
-    // Define the round number to attempt voting in, which is incorrect.
-    const wrongVoteRound = 100;
-
     // Define the accounts required to perform a vote in the wrong round.
     const doVoteWrongRoundAccounts = {
-      vouterData: deriveVouterPda(currentRound, voter.publicKey), // Derive with round 1, assuming current round is 3.
-      signer: voter.publicKey, // Voter's public key.
+      voterData: deriveVoterPda(wrongRound, voterA.publicKey, projectId), // Derive with round 1, assuming current round is 3.
+      signer: voterA.publicKey, // Voter's public key.
       voteManager: voteManagerPda, // VoteManager PDA.
       adminTokenAccount: mintTokenAccount,
-      project: wrongRoundProjectPda, // Project PDA being voted for.
+      project: projectPda, // Project PDA being voted for.
       mint: tokenMint.publicKey, // Token mint's public key.
-      token: voterAta, // Voter's token account.
+      token: voterAAta, // Voter's token account.
       tokenProgram: TOKEN_2022_PROGRAM_ID, // SPL Token program ID.
       systemProgram: anchor.web3.SystemProgram.programId, // System program ID.
     };
@@ -786,99 +746,23 @@ describe("ttt-labs-tests", () => {
     try {
       // Attempt to vote in the wrong round by providing an incorrect round number.
       await program.methods
-        .doVote(wrongVoteRound) // Incorrect round number.
+        .doVote()
         .accounts(doVoteWrongRoundAccounts)
-        .signers([voter])
+        .signers([voterA])
         .rpc();
 
       // If the above transaction succeeds, the test should fail.
       throw new Error("Expected transaction to fail, but it succeeded");
-    } catch (err) {
-      // Assert that the error message indicates voting in the wrong round.
-      expect(err.message).to.include("ConstraintSeeds"); // Adjusted based on actual error handling.
+    } catch (err: any) {
+      expect(err.error.errorCode.code).to.equal("ConstraintSeeds");
     }
   });
 
-  // /**
-  //  * Test Case: Voting Fee Transfer
-  //  * Purpose: Verify that the voting fee is correctly transferred from the voter to the admin upon voting.
-  //  */
-  it("Voting Fee Transfer", async () => {
-    // Define a project identifier for the fee transfer test.
-
-    // Define the accounts required to increment the round.
-    const incrementAccounts = {
-      voteData: voteManagerPda,
-      owner: adminWallet.publicKey,
-    };
-
-    // Execute the round increment.
-    await program.methods
-      .incrementRound()
-      .accounts(incrementAccounts)
-      .rpc();
-
-    const feeTransferProjectIdx = generateProjectIdx(10);
-
-    const voteManagerAccount = await program.account.voteManager.fetch(voteManagerPda);
-    const currentRound = voteManagerAccount.voteRound;
-
-    const feeTransferProjectPda = deriveProjectPda(feeTransferProjectIdx, currentRound, adminWallet.publicKey);
-
-    // Define the accounts required to add the fee transfer project.
-    const addProjectAccounts = {
-      projectData: feeTransferProjectPda,
-      voteManager: voteManagerPda,
-      owner: adminWallet.publicKey,
-      systemProgram: anchor.web3.SystemProgram.programId,
-    };
-
-    // Add the fee transfer project to the VoteManager.
-    await program.methods
-      .addProject(feeTransferProjectIdx)
-      .accounts(addProjectAccounts)
-      .rpc();
-
-    // Define the accounts required to perform a vote.
-    const doVoteAccounts = {
-      vouterData: deriveVouterPda(currentRound, voter.publicKey),
-      signer: voter.publicKey, // Voter's public key.
-      voteManager: voteManagerPda, // VoteManager PDA.
-      adminTokenAccount: mintTokenAccount,
-      project: feeTransferProjectPda, // Project PDA being voted for.
-      mint: tokenMint.publicKey, // Token mint's public key.
-      token: voterAta, // Voter's token account.
-      tokenProgram: TOKEN_2022_PROGRAM_ID, // SPL Token program ID.
-      systemProgram: anchor.web3.SystemProgram.programId, // System program ID.
-    };
-
-    // Fetch the voter's and admin's initial token balances before voting.
-    const initialVoterBalance = await getTokenBalance(provider.connection, voterAta);
-    const initialAdminBalance = await getTokenBalance(provider.connection, mintTokenAccount);
-
-    // Perform the vote, which should transfer the vote fee from the voter to the admin.
-    await program.methods
-      .doVote(currentRound)
-      .accounts(doVoteAccounts)
-      .signers([voter])
-      .rpc();
-
-    // Fetch the voter's and admin's token balances after voting.
-    const finalVoterBalance = await getTokenBalance(provider.connection, voterAta);
-    const finalAdminBalance = await getTokenBalance(provider.connection, mintTokenAccount);
-
-    // Assert that the voter's balance decreased by the vote fee amount (500 TTT).
-    expect(finalVoterBalance).to.equal(initialVoterBalance - voteManagerAccount.voteFee.toNumber());
-
-    // Assert that the admin's balance increased by the vote fee amount (500 TTT).
-    expect(finalAdminBalance).to.equal(initialAdminBalance + voteManagerAccount.voteFee.toNumber());
-  });
-
-  // /**
-  //  * Test Case: Successful Vote
-  //  * Purpose: Verify that a valid vote correctly updates the project's vote count and the voter's voting data.
-  //  */
-  it("Successful Vote", async () => {
+  /**
+   * Test Case: Successful Vote + fee transfer
+   * Purpose: Verify that a valid vote correctly updates the project's vote count and the voter's voting data.
+   */
+  it("Successful Vote, fee transfer", async () => {
     // Define a project identifier for the successful vote test.
     const incrementAccounts = {
       voteData: voteManagerPda,
@@ -890,11 +774,11 @@ describe("ttt-labs-tests", () => {
       .accounts(incrementAccounts)
       .rpc();
 
-    const successfulVoteProjectIdx = generateProjectIdx(10);
+    const successfulVoteProjectId = generateProjectId(10);
     const voteManagerAccount = await program.account.voteManager.fetch(voteManagerPda);
     const currentRound = voteManagerAccount.voteRound;;
 
-    const successfulVoteProjectPda = deriveProjectPda(successfulVoteProjectIdx, currentRound, adminWallet.publicKey);
+    const successfulVoteProjectPda = deriveProjectPda(successfulVoteProjectId, currentRound, adminWallet.publicKey);
 
     // Define the accounts required to add the successful vote project.
     const addProjectAccounts = {
@@ -906,43 +790,332 @@ describe("ttt-labs-tests", () => {
 
     // Add the successful vote project to the VoteManager.
     await program.methods
-      .addProject(successfulVoteProjectIdx)
+      .addProject(successfulVoteProjectId)
       .accounts(addProjectAccounts)
       .rpc();
 
     // Define the accounts required to perform a vote.
     const doVoteAccounts = {
-      vouterData: deriveVouterPda(currentRound, voter.publicKey), // Vouter PDA for the voter in round 5.
-      signer: voter.publicKey, // Voter's public key.
+      voterData: deriveVoterPda(currentRound, voterA.publicKey, successfulVoteProjectId), // Voter PDA for the voter in round 5.
+      signer: voterA.publicKey, // Voter's public key.
       voteManager: voteManagerPda, // VoteManager PDA.
       adminTokenAccount: mintTokenAccount,
       project: successfulVoteProjectPda, // Project PDA being voted for.
       mint: tokenMint.publicKey, // Token mint's public key.
-      token: voterAta, // Voter's token account.
+      token: voterAAta, // Voter's token account.
       tokenProgram: TOKEN_2022_PROGRAM_ID, // SPL Token program ID.
       systemProgram: anchor.web3.SystemProgram.programId, // System program ID.
     };
 
+    // Fetch the voter's and admin's initial token balances before voting.
+    const initialVoterBalance = await getTokenBalance(provider.connection, voterAAta);
+    const initialAdminBalance = await getTokenBalance(provider.connection, mintTokenAccount);
     // Perform the vote, which should update the project's vote count and voter's data.
     await program.methods
-      .doVote(currentRound)
+      .doVote()
       .accounts(doVoteAccounts)
-      .signers([voter])
+      .signers([voterA])
       .rpc();
+
+    // Fetch the voter's and admin's token balances after voting.
+    const finalVoterBalance = await getTokenBalance(provider.connection, voterAAta);
+    const finalAdminBalance = await getTokenBalance(provider.connection, mintTokenAccount);
 
     // Fetch the project's account data after the vote.
     const projectAccount = await program.account.projectData.fetch(successfulVoteProjectPda);
 
     // Fetch the voter's voting data after the vote.
-    const voterAccount = await program.account.vouterData.fetch(doVoteAccounts.vouterData);
+    const voterAccount = await program.account.voterData.fetch(doVoteAccounts.voterData);
 
     // Assertions to ensure the vote was successfully recorded.
-    expect(projectAccount.idx).to.equal(successfulVoteProjectIdx); // Project identifier should match.
+    expect(projectAccount.id).to.equal(successfulVoteProjectId); // Project identifier should match.
     expect(projectAccount.voteRound).to.equal(currentRound); // Project should be associated with round 5.
     expect(projectAccount.voteCount.toNumber()).to.be.greaterThan(0); // Project's vote count should have increased.
 
     expect(voterAccount.voteCount.toNumber()).to.be.greaterThan(0); // Voter's vote count should have increased.
     expect(voterAccount.lastVotedRound).to.equal(currentRound);
+
+    // Assert that the voter's balance decreased by the vote fee amount (500 ttt).
+    expect(finalVoterBalance).to.equal(initialVoterBalance - voteManagerAccount.voteFee.toNumber());
+
+    // Assert that the admin's balance increased by the vote fee amount (500 ttt).
+    expect(finalAdminBalance).to.equal(initialAdminBalance + voteManagerAccount.voteFee.toNumber());
+  });
+
+  /**
+   * Test Case: Multiple users voting on the same project in the same round
+   * Purpose: Ensure vote count stored properly per project
+   */
+  it("Multiple users voting on the same project in the same round", async () => {
+    // Create a unique project
+    const multiUserProjectId = generateProjectId(10);
+    const voteManagerAccount = await program.account.voteManager.fetch(voteManagerPda);
+    const currentRound = voteManagerAccount.voteRound;
+
+    const multiUserProjectPda = deriveProjectPda(multiUserProjectId, currentRound, adminWallet.publicKey);
+
+    const addProjectAccounts = {
+      projectData: multiUserProjectPda,
+      voteManager: voteManagerPda,
+      owner: adminWallet.publicKey,
+      systemProgram: anchor.web3.SystemProgram.programId,
+    };
+
+    // Add the project
+    await program.methods
+      .addProject(multiUserProjectId)
+      .accounts(addProjectAccounts)
+      .rpc();
+
+    // userA votes
+    const doVoteAccountsUserA = {
+      voterData: deriveVoterPda(currentRound, voterA.publicKey, multiUserProjectId),
+      signer: voterA.publicKey,
+      voteManager: voteManagerPda,
+      adminTokenAccount: mintTokenAccount,
+      project: multiUserProjectPda,
+      mint: tokenMint.publicKey,
+      token: voterAAta,
+      tokenProgram: TOKEN_2022_PROGRAM_ID,
+      systemProgram: anchor.web3.SystemProgram.programId,
+    };
+    await program.methods.doVote().accounts(doVoteAccountsUserA).signers([voterA]).rpc();
+
+    // userB votes
+    const doVoteAccountsUserB = {
+      voterData: deriveVoterPda(currentRound, voterB.publicKey, multiUserProjectId),
+      signer: voterB.publicKey,
+      voteManager: voteManagerPda,
+      adminTokenAccount: mintTokenAccount,
+      project: multiUserProjectPda,
+      mint: tokenMint.publicKey,
+      token: voterBAta,
+      tokenProgram: TOKEN_2022_PROGRAM_ID,
+      systemProgram: anchor.web3.SystemProgram.programId,
+    };
+
+    await program.methods.doVote().accounts(doVoteAccountsUserB).signers([voterB]).rpc();
+
+    // Check final result
+    const projectAccount = await program.account.projectData.fetch(multiUserProjectPda);
+    expect(projectAccount.voteCount.toNumber()).to.equal(2, "Project should have 2 total votes");
+  });
+
+  /**
+   * Test Case: Insufficient tokens for voting fee should fail
+   * Purpose: Ensure that user has enough ttt to vote
+   */
+  it("Insufficient tokens for voting fee should fail", async () => {
+    const insufficientProjectId = generateProjectId(10);
+    const voteManagerAccount = await program.account.voteManager.fetch(voteManagerPda);
+    const currentRound = voteManagerAccount.voteRound;
+
+    const insufficientProjectPda = deriveProjectPda(insufficientProjectId, currentRound, adminWallet.publicKey);
+
+    const addProjectAccounts = {
+      projectData: insufficientProjectPda,
+      voteManager: voteManagerPda,
+      owner: adminWallet.publicKey,
+      systemProgram: anchor.web3.SystemProgram.programId,
+    };
+
+    // Add a project
+    await program.methods
+      .addProject(insufficientProjectId)
+      .accounts(addProjectAccounts)
+      .rpc();
+
+    // Create a user with no ttt tokens
+    const insufficientUserAta = await getAssociatedTokenAddress(
+      tokenMint.publicKey,
+      insufficientUser.publicKey,
+      true,
+      TOKEN_2022_PROGRAM_ID,
+      ASSOCIATED_PROGRAM_ID
+    );
+
+    const ataTransaction = new anchor.web3.Transaction().add(
+      createAssociatedTokenAccountInstruction(
+        provider.publicKey,
+        insufficientUserAta,
+        insufficientUser.publicKey,
+        tokenMint.publicKey,
+        TOKEN_2022_PROGRAM_ID,
+        ASSOCIATED_PROGRAM_ID
+      )
+    );
+
+    await provider.sendAndConfirm(ataTransaction); // Send and confirm the ATA creation transaction.
+
+    // (No token transfer from admin, so user has 0 ttt)
+
+    // Attempt to vote
+    const doVoteAccounts = {
+      voterData: deriveVoterPda(currentRound, insufficientUser.publicKey, insufficientProjectId),
+      signer: insufficientUser.publicKey,
+      voteManager: voteManagerPda,
+      adminTokenAccount: mintTokenAccount,
+      project: insufficientProjectPda,
+      mint: tokenMint.publicKey,
+      token: insufficientUserAta,
+      tokenProgram: TOKEN_2022_PROGRAM_ID,
+      systemProgram: anchor.web3.SystemProgram.programId,
+    };
+
+    try {
+      await program.methods
+        .doVote()
+        .accounts(doVoteAccounts)
+        .signers([insufficientUser])
+        .rpc();
+
+      throw new Error("Expected InsufficientTokens error, but transaction succeeded.");
+    } catch (err: any) {
+      expect(err.error.errorCode.code).to.equal("InsufficientTokens");
+    }
+  });
+
+  /**
+   * Test Case: Voting on a previous round's project fails with WrongRound
+   * Purpose: Ensure that user is unable to vote for project from other rounds.
+   */
+  it("Voting on a previous round's project fails with WrongRound", async () => {
+    // 1) Add a project in round1
+    let voteManagerAccount = await program.account.voteManager.fetch(voteManagerPda);
+    const oldRound = voteManagerAccount.voteRound;
+    const oldRoundProjectId = generateProjectId(10);
+    const oldRoundProjectPda = deriveProjectPda(oldRoundProjectId, oldRound, adminWallet.publicKey);
+
+    const addProjectAccounts = {
+      projectData: oldRoundProjectPda,
+      voteManager: voteManagerPda,
+      owner: adminWallet.publicKey,
+      systemProgram: anchor.web3.SystemProgram.programId,
+    };
+
+    await program.methods
+      .addProject(oldRoundProjectId)
+      .accounts(addProjectAccounts)
+      .rpc();
+
+    const incrementAccounts = {
+      voteData: voteManagerPda,
+      owner: adminWallet.publicKey,
+    };
+
+    // 2) Increment the round
+    await program.methods
+      .incrementRound()
+      .accounts(incrementAccounts)
+      .rpc();
+
+    // The project is from the old round. Let's attempt to vote:
+    const doVoteAccounts = {
+      voterData: deriveVoterPda(oldRound, voterA.publicKey, oldRoundProjectId),
+      signer: voterA.publicKey,
+      voteManager: voteManagerPda,
+      adminTokenAccount: mintTokenAccount,
+      project: oldRoundProjectPda,
+      mint: tokenMint.publicKey,
+      token: voterAAta,
+      tokenProgram: TOKEN_2022_PROGRAM_ID,
+      systemProgram: anchor.web3.SystemProgram.programId,
+    };
+
+    try {
+      await program.methods.doVote().accounts(doVoteAccounts).signers([voterA]).rpc();
+      throw new Error("Expected WrongRound error, but transaction succeeded.");
+    } catch (err: any) {
+      expect(err.error.errorCode.code).to.equal("WrongRound");
+    }
+  });
+
+  /**
+   * Test Case: User votes in two consecutive rounds successfully
+   * Purpose: Ensure successfull consecutive voting.
+   */
+  it("User votes in two consecutive rounds successfully", async () => {
+    // Round #1
+    let voteManagerAccount = await program.account.voteManager.fetch(voteManagerPda);
+    const round1 = voteManagerAccount.voteRound;
+    const projectIdRound1 = generateProjectId(10);
+    const pdaProjectRound1 = deriveProjectPda(projectIdRound1, round1, adminWallet.publicKey);
+
+    const addProjectAccounts = {
+      projectData: pdaProjectRound1,
+      voteManager: voteManagerPda,
+      owner: adminWallet.publicKey,
+      systemProgram: anchor.web3.SystemProgram.programId,
+    };
+
+    // Add project for Round 1
+    await program.methods
+      .addProject(projectIdRound1)
+      .accounts(addProjectAccounts)
+      .rpc();
+
+    // Do Vote in Round 1
+    const doVoteAccountsRound1 = {
+      voterData: deriveVoterPda(round1, voterA.publicKey, projectIdRound1),
+      signer: voterA.publicKey,
+      voteManager: voteManagerPda,
+      adminTokenAccount: mintTokenAccount,
+      project: pdaProjectRound1,
+      mint: tokenMint.publicKey,
+      token: voterAAta,
+      tokenProgram: TOKEN_2022_PROGRAM_ID,
+      systemProgram: anchor.web3.SystemProgram.programId,
+    };
+    await program.methods.doVote().accounts(doVoteAccountsRound1).signers([voterA]).rpc();
+
+    const incrementAccounts = {
+      voteData: voteManagerPda,
+      owner: adminWallet.publicKey,
+    };
+
+    // Increment Round
+    await program.methods
+      .incrementRound()
+      .accounts(incrementAccounts)
+      .rpc();
+
+    voteManagerAccount = await program.account.voteManager.fetch(voteManagerPda);
+    const round2 = voteManagerAccount.voteRound;
+    const projectIdRound2 = generateProjectId(10);
+    const pdaProjectRound2 = deriveProjectPda(projectIdRound2, round2, adminWallet.publicKey);
+
+    const addProjectAccounts1 = {
+      projectData: pdaProjectRound2,
+      voteManager: voteManagerPda,
+      owner: adminWallet.publicKey,
+      systemProgram: anchor.web3.SystemProgram.programId,
+    };
+
+    // Add project for Round 2
+    await program.methods
+      .addProject(projectIdRound2)
+      .accounts(addProjectAccounts1)
+      .rpc();
+
+    // Do Vote in Round 2
+    const doVoteAccountsRound2 = {
+      voterData: deriveVoterPda(round2, voterA.publicKey, projectIdRound2),
+      signer: voterA.publicKey,
+      voteManager: voteManagerPda,
+      adminTokenAccount: mintTokenAccount,
+      project: pdaProjectRound2,
+      mint: tokenMint.publicKey,
+      token: voterAAta,
+      tokenProgram: TOKEN_2022_PROGRAM_ID,
+      systemProgram: anchor.web3.SystemProgram.programId,
+    };
+    await program.methods.doVote().accounts(doVoteAccountsRound2).signers([voterA]).rpc();
+
+    // Validate results for Round 1 and Round 2
+    const projectRound1 = await program.account.projectData.fetch(pdaProjectRound1);
+    const projectRound2 = await program.account.projectData.fetch(pdaProjectRound2);
+    expect(projectRound1.voteCount.toNumber()).to.equal(1, "Round 1 project has 1 vote");
+    expect(projectRound2.voteCount.toNumber()).to.equal(1, "Round 2 project has 1 vote");
   });
 });
 

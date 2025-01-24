@@ -33,7 +33,7 @@ pub mod token_extensions {
         instructions::handler(ctx, args)
     }
 
-    /// Transfers a specified amount of QZL tokens from one admin's token accounnt to another.
+    /// Transfers a specified amount of ttt tokens from one admin's token accounnt to another.
     /// Utilizes the Token-2022 program's CPI to ensure safe and verified transfers.
     ///
     /// INFO: Currently used only in tests

@@ -23,11 +23,6 @@ pub const META_LIST_ACCOUNT_SEED: &[u8] = b"extra-account-metas";
 /// **Business Logic:**
 /// - Maintains rent-exemption by funding accounts that fall below the required balance.
 /// - Transfers lamports from the payer to the target account if necessary.
-///
-/// **Parameters:**
-/// - `account`: The account to check and potentially fund.
-/// - `payer`: The account providing additional lamports.
-/// - `system_program`: The Solana System program for invoking transfers.
 pub fn update_account_lamports_to_minimum_balance<'info>(
     account: AccountInfo<'info>,
     payer: AccountInfo<'info>,
@@ -51,12 +46,6 @@ pub fn update_account_lamports_to_minimum_balance<'info>(
 /// - Allows the program to access and validate custom extensions associated with the token mint.
 /// - Facilitates interaction with extended functionalities like metadata pointers and group
 ///   memberships.
-///
-/// **Parameters:**
-/// - `account`: The mint account from which to retrieve extension data.
-///
-/// **Returns:**
-/// - The extension data of type `T` if successfully retrieved.
 pub fn get_mint_extensible_extension_data<T: Extension + VariableLenPack>(
     account: &mut AccountInfo,
 ) -> Result<T> {
@@ -72,12 +61,6 @@ pub fn get_mint_extensible_extension_data<T: Extension + VariableLenPack>(
 /// - Similar to `get_mint_extensible_extension_data` but tailored for fixed-size extensions.
 /// - Ensures that specific extensions like `MetadataPointer` and `PermanentDelegate` are correctly
 ///   configured.
-///
-/// **Parameters:**
-/// - `account`: The mint account from which to retrieve extension data.
-///
-/// **Returns:**
-/// - The extension data of type `T` if successfully retrieved.
 pub fn get_mint_extension_data<T: Extension + Pod>(account: &mut AccountInfo) -> Result<T> {
     let mint_data = account.data.borrow();
     let mint_with_extension = StateWithExtensions::<Mint>::unpack(&mint_data)?;
@@ -90,9 +73,6 @@ pub fn get_mint_extension_data<T: Extension + Pod>(account: &mut AccountInfo) ->
 /// **Business Logic:**
 /// - Manages permissions and authorities for token operations by maintaining metadata.
 /// - Supports scenarios where specific approval mechanisms are required.
-///
-/// **Parameters:**
-/// - `approve_account`: An optional public key representing an account with approval rights.
 ///
 /// **Returns:**
 /// - A vector of `ExtraAccountMeta` containing the metadata if `approve_account` is provided.
@@ -114,9 +94,6 @@ pub fn get_meta_list(approve_account: Option<Pubkey>) -> Vec<ExtraAccountMeta> {
 ///
 /// **Business Logic:**
 /// - Allocates sufficient space for storing account metadata.
-///
-/// **Parameters:**
-/// - `approve_account`: An optional public key representing an account with approval rights.
 ///
 /// **Returns:**
 /// - The size in bytes required for the metadata list account.
